@@ -90,7 +90,29 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" release/* \
-            --verify-tag \
-            --generate-notes \
-            --title "Pool Skimmer ${GITHUB_REF_NAME}"
+          if gh release view "${GITHUB_REF_NAME}" --json tagName >/dev/null 2>&1; then
+            mkdir -p existing-release
+            existing_asset_count="$(gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets | length')"
+            if (( existing_asset_count > 0 )); then
+              gh release download "${GITHUB_REF_NAME}" --dir existing-release
+            fi
+
+            for artifact in release/*; do
+              existing="existing-release/${artifact##*/}"
+              if [[ -f "$existing" ]] && ! cmp -s "$artifact" "$existing"; then
+                echo "Release asset ${artifact##*/} differs; refusing to overwrite it" >&2
+                exit 1
+              fi
+            done
+
+            for artifact in release/*; do
+              if [[ ! -f "existing-release/${artifact##*/}" ]]; then
+                gh release upload "${GITHUB_REF_NAME}" "$artifact"
+              fi
+            done
+          else
+            gh release create "${GITHUB_REF_NAME}" release/* \
+              --verify-tag \
+              --generate-notes \
+              --title "Pool Skimmer ${GITHUB_REF_NAME}"
+          fi
