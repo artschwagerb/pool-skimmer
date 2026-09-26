@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: 1.27.1
+
+jobs:
+  validate:
+    name: Test and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: Check formatting
+        shell: bash
+        run: |
+          files="$(gofmt -l $(find cmd internal -type f -name '*.go' -print))"
+          if [[ -n "$files" ]]; then
+            printf 'The following files need gofmt:\n%s\n' "$files" >&2
+            exit 1
+          fi
+
+      - name: Run race detector
+        run: go test -race ./...
+
+      - name: Run Docker tests and vet
+        run: make test GO_VERSION="${GO_VERSION}"
+
+      - name: Build runtime image
+        run: make image VERSION=ci GO_VERSION="${GO_VERSION}"
+
+      - name: Build release targets
+        run: make dist VERSION=ci GO_VERSION="${GO_VERSION}"
+
+      - name: Verify release targets and smoke-test Linux
+        shell: bash
+        run: |
+          for target in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
+            test -x "dist/${target}/pool-skimmer"
+          done
+          ./dist/linux-amd64/pool-skimmer version | grep -Fx 'pool-skimmer ci'
+
+  vulnerability-scan:
+    name: Vulnerability scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run govulncheck
+        uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1
+        with:
+          go-version-input: ${{ env.GO_VERSION }}
+          go-package: ./...
+          repo-checkout: false
+          cache: false

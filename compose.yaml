@@ -1,0 +1,20 @@
+services:
+  pool-skimmer:
+    build:
+      context: .
+      args:
+        VERSION: ${POOL_SKIMMER_VERSION:-dev}
+    image: pool-skimmer:local
+    environment:
+      - SCIM_ENDPOINT
+      - SCIM_API_KEY
+      - SCIM_API_KEY_FILE
+      - SCIM_AUTH_HEADER
+      - SCIM_AUTH_SCHEME
+      - SCIM_TIMEOUT
+      - SCIM_READ_RETRIES
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
