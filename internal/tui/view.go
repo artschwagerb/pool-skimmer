@@ -363,6 +363,10 @@ func (m Model) renderFooter() string {
 	case screenEndpointCreate:
 		help = key("ctrl+s") + " save  " + key("tab") + " next field  " + key("esc") + " cancel"
 	case screenBrowse:
+		if m.busy && m.pendingLoad > 0 {
+			help = key("↑/↓") + " navigate  " + key("tab") + " switch  " + key("enter") + " inspect  " + key("?") + " help  " + key("q") + " quit"
+			break
+		}
 		help = key("↑/↓") + " navigate  " + key("tab") + " switch  " + key("/") + " filter  " + key("o") + " sort  " + key("x") + " export  " + key("enter") + " inspect  " + key("e") + " edit  "
 		if m.activeType == "Users" {
 			help += key("space") + " activate  "
@@ -375,6 +379,10 @@ func (m Model) renderFooter() string {
 		}
 		help += key("?") + " help  " + key("q") + " quit"
 	case screenDetail:
+		if m.busy && m.pendingLoad > 0 {
+			help = key("esc") + " back  " + key("↑/↓") + " scroll  " + key("?") + " help  " + key("q") + " quit"
+			break
+		}
 		help = key("esc") + " back  " + key("↑/↓") + " scroll  " + key("c") + " copy JSON  " + key("e") + " edit  " + key("d") + " delete  " + key("r") + " refresh"
 		if m.endpointStore != nil {
 			help += "  " + key("s") + " endpoint"
