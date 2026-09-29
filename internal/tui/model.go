@@ -126,7 +126,6 @@ type Model struct {
 	memberGroup string
 	returnTo    screen
 	helpReturn  screen
-	refreshID   string
 	detail      viewport.Model
 
 	filterInput textinput.Model
@@ -152,6 +151,7 @@ func NewModel(ctx context.Context, client *scim.Client, endpoint, version string
 	model.endpoint = endpoint
 	model.screen = screenBrowse
 	model.pendingLoad = 2
+	model.busy = client != nil
 	model.status = "Connecting to the SCIM endpoint…"
 	return model
 }
@@ -303,7 +303,7 @@ func (m Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateBrowse(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	if m.busy {
+	if m.busy && m.pendingLoad == 0 {
 		return m, nil
 	}
 	switch key.String() {
@@ -312,6 +312,22 @@ func (m Model) updateBrowse(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "tab", "right", "left", "shift+tab":
 		m.switchResourceType()
 		return m, nil
+	case "enter":
+		if m.selectedResource() != nil {
+			m.screen = screenDetail
+			m.refreshDetail()
+		}
+		return m, nil
+	case "?":
+		m.helpReturn, m.screen = screenBrowse, screenHelp
+		return m, nil
+	}
+	if m.busy {
+		var command tea.Cmd
+		m.table, command = m.table.Update(key)
+		return m, command
+	}
+	switch key.String() {
 	case "/":
 		return m.startFilter()
 	case "o":
@@ -322,12 +338,6 @@ func (m Model) updateBrowse(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.startRefresh()
 	case "s":
 		return m.startEndpointSelection()
-	case "enter":
-		if m.selectedResource() != nil {
-			m.screen = screenDetail
-			m.refreshDetail()
-		}
-		return m, nil
 	case "e":
 		return m.startEdit(screenBrowse)
 	case "d":
@@ -340,9 +350,6 @@ func (m Model) updateBrowse(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.activeType == "Groups" {
 			return m.startMembers(screenBrowse)
 		}
-	case "?":
-		m.helpReturn, m.screen = screenBrowse, screenHelp
-		return m, nil
 	}
 	var command tea.Cmd
 	m.table, command = m.table.Update(key)
@@ -350,7 +357,7 @@ func (m Model) updateBrowse(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateDetail(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	if m.busy {
+	if m.busy && m.pendingLoad == 0 {
 		return m, nil
 	}
 	switch key.String() {
@@ -359,6 +366,16 @@ func (m Model) updateDetail(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "esc", "backspace":
 		m.screen = screenBrowse
 		return m, nil
+	case "?":
+		m.helpReturn, m.screen = screenDetail, screenHelp
+		return m, nil
+	}
+	if m.busy {
+		var command tea.Cmd
+		m.detail, command = m.detail.Update(key)
+		return m, command
+	}
+	switch key.String() {
 	case "e":
 		return m.startEdit(screenDetail)
 	case "c":
@@ -377,9 +394,6 @@ func (m Model) updateDetail(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.startRefresh()
 	case "s":
 		return m.startEndpointSelection()
-	case "?":
-		m.helpReturn, m.screen = screenDetail, screenHelp
-		return m, nil
 	}
 	var command tea.Cmd
 	m.detail, command = m.detail.Update(key)
@@ -618,13 +632,18 @@ func (m Model) handleResourcesLoaded(msg resourcesLoadedMsg) (tea.Model, tea.Cmd
 	if msg.err != nil {
 		m.errorText = fmt.Sprintf("Could not load %s: %v", strings.ToLower(msg.resourceType), msg.err)
 	} else {
+		selectedID := ""
+		if msg.resourceType == m.activeType {
+			if selected := m.selectedResource(); selected != nil {
+				selectedID = stringValue((*selected)["id"])
+			}
+		}
 		m.setResources(msg.resourceType, msg.resources)
 		if msg.resourceType == m.activeType {
-			m.applyFilter(m.refreshID)
+			m.applyFilter(selectedID)
 			if m.screen == screenDetail {
 				m.refreshDetail()
 			}
-			m.refreshID = ""
 		}
 	}
 	if m.pendingLoad == 0 {
@@ -765,9 +784,6 @@ func (m Model) startExport() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) startRefresh() (tea.Model, tea.Cmd) {
-	if selected := m.selectedResource(); selected != nil {
-		m.refreshID = stringValue((*selected)["id"])
-	}
 	m.pendingLoad += 2
 	m.busy = true
 	m.errorText = ""
@@ -922,8 +938,10 @@ func (m *Model) switchResourceType() {
 		m.activeType = "Users"
 	}
 	m.applyFilter("")
-	m.errorText = ""
-	m.status = fmt.Sprintf("%d %s", len(m.visible), strings.ToLower(m.activeType))
+	if m.pendingLoad == 0 {
+		m.errorText = ""
+		m.status = fmt.Sprintf("%d %s", len(m.visible), strings.ToLower(m.activeType))
+	}
 }
 
 func (m *Model) resize(width, height int) {

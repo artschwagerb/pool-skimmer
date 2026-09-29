@@ -120,8 +120,97 @@ func TestEndpointSelectorConnectsWithSavedCredential(t *testing.T) {
 	}
 	updated, command = model.handleEndpointConnected(connected)
 	model = updated.(Model)
-	if model.screen != screenBrowse || model.endpointName != "Production" || command == nil || model.pendingLoad != 2 {
-		t.Fatalf("screen=%v name=%q command=%v pending=%d", model.screen, model.endpointName, command, model.pendingLoad)
+	if model.screen != screenBrowse || model.endpointName != "Production" || command == nil || model.pendingLoad != 2 || !model.busy {
+		t.Fatalf("screen=%v name=%q command=%v pending=%d busy=%v", model.screen, model.endpointName, command, model.pendingLoad, model.busy)
+	}
+	updated, _ = model.Update(keyPress(tea.KeyTab, ""))
+	model = updated.(Model)
+	if model.activeType != "Groups" {
+		t.Fatalf("could not switch tabs after connecting to a saved endpoint: type=%q", model.activeType)
+	}
+}
+
+func TestInitialLoadingAllowsBrowsingGroupsWhileUsersLoad(t *testing.T) {
+	client, err := scim.NewClient("https://example.test/scim/v2", "synthetic-test-key", "Authorization", "Bearer", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := NewModel(context.Background(), client, client.Endpoint(), "test")
+	if !model.busy || model.pendingLoad != 2 {
+		t.Fatalf("initial state: busy=%v pending=%d", model.busy, model.pendingLoad)
+	}
+
+	updated, _ := model.Update(keyPress(tea.KeyTab, ""))
+	model = updated.(Model)
+	if model.activeType != "Groups" || model.screen != screenBrowse {
+		t.Fatalf("could not switch to groups during initial load: type=%q screen=%v", model.activeType, model.screen)
+	}
+
+	updated, _ = model.Update(resourcesLoadedMsg{resourceType: "Groups", resources: []scim.Resource{
+		{"id": "g-1", "displayName": "Alpha Team"},
+		{"id": "g-2", "displayName": "Beta Team"},
+	}})
+	model = updated.(Model)
+	if model.pendingLoad != 1 || !model.busy || len(model.visible) != 2 {
+		t.Fatalf("groups should be browsable while users load: pending=%d busy=%v visible=%d", model.pendingLoad, model.busy, len(model.visible))
+	}
+	if footer := ansi.Strip(model.renderFooter()); !strings.Contains(footer, "tab switch") || strings.Contains(footer, "e edit") {
+		t.Fatalf("loading footer advertises incorrect actions: %q", footer)
+	}
+	updated, _ = model.Update(keyPress('e', "e"))
+	model = updated.(Model)
+	if model.screen != screenBrowse {
+		t.Fatalf("edit became available during loading: screen=%v", model.screen)
+	}
+	updated, _ = model.Update(keyPress(tea.KeyDown, ""))
+	model = updated.(Model)
+	if selected := model.selectedResource(); selected == nil || stringValue((*selected)["id"]) != "g-2" {
+		t.Fatalf("could not navigate loaded groups: selected=%#v", selected)
+	}
+	updated, _ = model.Update(keyPress(tea.KeyEnter, ""))
+	model = updated.(Model)
+	if model.screen != screenDetail || !strings.Contains(ansi.Strip(model.View().Content), "Beta Team") {
+		t.Fatalf("could not inspect a loaded group during user load: screen=%v", model.screen)
+	}
+	updated, _ = model.Update(keyPress(tea.KeyEscape, ""))
+	model = updated.(Model)
+	if model.screen != screenBrowse {
+		t.Fatalf("could not return to browser during user load: screen=%v", model.screen)
+	}
+	updated, _ = model.Update(keyPress(tea.KeyEnter, ""))
+	model = updated.(Model)
+
+	updated, _ = model.Update(resourcesLoadedMsg{resourceType: "Users", resources: []scim.Resource{
+		{"id": "u-1", "userName": "alice@example.test"},
+	}})
+	model = updated.(Model)
+	if model.pendingLoad != 0 || model.busy || model.activeType != "Groups" || model.screen != screenDetail {
+		t.Fatalf("user load disrupted group inspection: pending=%d busy=%v type=%q screen=%v", model.pendingLoad, model.busy, model.activeType, model.screen)
+	}
+	updated, _ = model.Update(keyPress(tea.KeyEscape, ""))
+	model = updated.(Model)
+	if model.screen != screenBrowse || len(model.visible) != 2 {
+		t.Fatalf("could not return to groups: screen=%v visible=%d", model.screen, len(model.visible))
+	}
+}
+
+func TestSwitchingTabsDuringLoadingKeepsLoadErrorVisible(t *testing.T) {
+	client, err := scim.NewClient("https://example.test/scim/v2", "synthetic-test-key", "Authorization", "Bearer", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := NewModel(context.Background(), client, client.Endpoint(), "test")
+	updated, _ := model.Update(resourcesLoadedMsg{resourceType: "Users", err: io.ErrUnexpectedEOF})
+	model = updated.(Model)
+	updated, _ = model.Update(keyPress(tea.KeyTab, ""))
+	model = updated.(Model)
+	if model.activeType != "Groups" || !strings.Contains(model.errorText, "Could not load users") {
+		t.Fatalf("tab switch hid the user load error: type=%q error=%q", model.activeType, model.errorText)
+	}
+	updated, _ = model.Update(resourcesLoadedMsg{resourceType: "Groups", resources: []scim.Resource{{"id": "g-1", "displayName": "Alpha Team"}}})
+	model = updated.(Model)
+	if model.pendingLoad != 0 || len(model.visible) != 1 || !strings.Contains(ansi.Strip(model.View().Content), "Could not load users") {
+		t.Fatalf("completion hid the user load error: pending=%d visible=%d error=%q", model.pendingLoad, len(model.visible), model.errorText)
 	}
 }
 
@@ -142,6 +231,45 @@ func TestBrowserRendersLoadedResources(t *testing.T) {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("view does not contain %q:\n%s", expected, view)
 		}
+	}
+}
+
+func TestRefreshPreservesCurrentSelectionAfterSwitchingTabsWhileLoading(t *testing.T) {
+	client, err := scim.NewClient("https://example.test/scim/v2", "synthetic-test-key", "Authorization", "Bearer", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := NewModel(context.Background(), client, client.Endpoint(), "test")
+	model.pendingLoad = 0
+	model.busy = false
+	model.setResources("Users", []scim.Resource{{"id": "u-1", "userName": "alice@example.test"}})
+	model.setResources("Groups", []scim.Resource{
+		{"id": "g-1", "displayName": "Alpha Team"},
+		{"id": "g-2", "displayName": "Beta Team"},
+	})
+	model.applyFilter("")
+
+	updated, command := model.Update(keyPress('r', "r"))
+	model = updated.(Model)
+	if command == nil || !model.busy || model.pendingLoad != 2 {
+		t.Fatalf("refresh state: command=%v busy=%v pending=%d", command, model.busy, model.pendingLoad)
+	}
+	updated, _ = model.Update(keyPress(tea.KeyTab, ""))
+	model = updated.(Model)
+	updated, _ = model.Update(keyPress(tea.KeyDown, ""))
+	model = updated.(Model)
+	if selected := model.selectedResource(); selected == nil || stringValue((*selected)["id"]) != "g-2" {
+		t.Fatalf("could not browse old groups while refreshing: selected=%#v", selected)
+	}
+	updated, _ = model.Update(resourcesLoadedMsg{resourceType: "Users", resources: []scim.Resource{{"id": "u-1", "userName": "alice@example.test"}}})
+	model = updated.(Model)
+	updated, _ = model.Update(resourcesLoadedMsg{resourceType: "Groups", resources: []scim.Resource{
+		{"id": "g-1", "displayName": "Alpha Team Updated"},
+		{"id": "g-2", "displayName": "Beta Team Updated"},
+	}})
+	model = updated.(Model)
+	if selected := model.selectedResource(); selected == nil || stringValue((*selected)["id"]) != "g-2" || stringValue((*selected)["displayName"]) != "Beta Team Updated" {
+		t.Fatalf("refresh did not preserve current group selection: selected=%#v", selected)
 	}
 }
 
@@ -564,6 +692,7 @@ func TestRefreshReloadsUsersAndGroups(t *testing.T) {
 	}
 	model := NewModel(context.Background(), client, server.URL, "test")
 	model.pendingLoad = 0
+	model.busy = false
 	model.setResources("Users", []scim.Resource{{"id": "u-old", "userName": "old@example.com"}})
 	model.setResources("Groups", []scim.Resource{{"id": "g-old", "displayName": "Old Group"}})
 	model.applyFilter("")
